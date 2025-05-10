@@ -1,12 +1,14 @@
 {
-  "name": "test01",
-  "displayName": "Test01",
-  "description": "",
+  "name": "perl-code-generation",
+  "displayName": "Perl Code Generation",
+  "description": "Perl code generator",
   "version": "0.0.1",
   "engines": {
     "vscode": "^1.99.0"
   },
   "categories": [
+    "Programming Languages",
+    "Snippets",
     "Other"
   ],
   "activationEvents": [
@@ -14,13 +16,53 @@
   ],
   "main": "./extension.js",
   "contributes": {
-    "languages": [
+    "commands": [
       {
-        "id": "perl",
-        "extensions": [".pl", ".pm"],
-        "aliases": ["Perl", "perl"]
+        "command": "perlcodegeneration.analyzeContext",
+        "title": "Perl: Analyze Code Context"
+      },
+      {
+        "command": "vsExtension.debugTreeSitter",
+        "title": "Perl: Debug Tree-sitter Parser"
+      },
+      {
+        "command": "perlcodegeneration.findRelevantCode",
+        "title": "Perl: Find Relevant Code"
+      },
+      {
+        "command": "perlcodegeneration.getImports",
+        "title": "Perl: Analyze Imports"
+      },
+      {
+        "command": "perlcodegeneration.indexCodebase",
+        "title": "Perl: Index Codebase"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Perl Code Generation",
+      "properties": {
+        "perlCodeGeneration.debounceTime": {
+          "type": "number",
+          "default": 500,
+          "description": "Time in milliseconds to wait before generating code after typing stops"
+        },
+        "perlCodeGeneration.relevantCodeCount": {
+          "type": "number",
+          "default": 5,
+          "description": "Number of relevant code examples to retrieve"
+        },
+        "perlCodeGeneration.indexOnStartup": {
+          "type": "boolean",
+          "default": true,
+          "description": "Index the Perl codebase when the extension is first activated"
+        },
+        "perlCodeGeneration.contextWindowSize": {
+          "type": "number",
+          "default": 15,
+          "description": "Number of lines to consider around cursor for context"
+        }
+      }
+    }
   },
   "scripts": {
     "lint": "eslint .",
@@ -36,6 +78,12 @@
     "eslint": "^9.23.0"
   },
   "dependencies": {
-    "axios": "^1.8.4"
+    "@ganezdragon/tree-sitter-perl": "^1.1.1",
+    "@lancedb/lancedb": "^0.19.0",
+    "@xenova/transformers": "^2.17.2",
+    "axios": "^1.8.4",
+    "glob": "^11.0.2",
+    "tree-sitter": "^0.21.0",
+    "vscode-uri": "^3.1.0"
   }
 }

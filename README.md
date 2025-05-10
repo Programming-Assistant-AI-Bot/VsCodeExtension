@@ -1,6 +1,6 @@
-# test01 README
+# Perl Code Generator README
 
-This is the README for your extension "test01". After writing up a brief description, we recommend including the following sections.
+This is the README for your extension "Perl Code Generator". After writing up a brief description, we recommend including the following sections.
 
 ## Features
 
