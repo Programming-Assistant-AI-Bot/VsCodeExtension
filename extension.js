@@ -35,8 +35,8 @@ let outputChannel = null;
 async function fetchCode(comment, doc, pos) {
   try {
     const ctx = await generateContextForComments(comment, doc, pos);
-    const response = await api.post('/', { message: comment, context: ctx });
-    return response.data.message;
+    const response = await api.post('/commentCode/', { message: comment, context: ctx });
+    return response.data.code;
   } catch (err) {
     logError(`Error fetching suggestion: ${err.message}`, err);
     vscode.window.showErrorMessage(`Failed to generate code: ${err.message}`);
@@ -251,12 +251,16 @@ async function activate(context) {
       if (!comment) return { items: [] };
 
       const suggestion = await debouncedFetch(comment, doc, pos);
+
       if (!suggestion) return { items: [] };
-      
+      // Remove markdown formatting
+      const cleanCode = suggestion.replace(/```[\w]*\n|\n```/g, '');
+      // Use the clean code
+      console.log(cleanCode);
       const insertPos = new vscode.Position(pos.line, line.length);
       return {
         items: [{
-          insertText: '\n' + suggestion,
+          insertText: '\n' + cleanCode,
           range: new vscode.Range(insertPos, insertPos)
         }]
       };
