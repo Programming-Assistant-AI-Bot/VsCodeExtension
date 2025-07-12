@@ -9,11 +9,19 @@ const { MiniLmEmbeddingProvider } = require('../embeddings/miniLmEmbeddings');
 class PerlVectorIndex {
   /**
    * @param {Object} structureIndex - Code structure index
+   * @param {vscode.WorkspaceFolder} workspace - The workspace this index belongs to
    */
-  constructor(structureIndex) {
+  constructor(structureIndex, workspace) {
     this.structureIndex = structureIndex;
     this.embedProvider = new MiniLmEmbeddingProvider();
-    this.dbPath = path.join(os.homedir(), '.vscode', 'perl-extension-db');
+    
+    // Generate project-specific folder name (sanitized workspace path)
+    const workspaceName = workspace ? 
+      workspace.uri.fsPath.replace(/[\/\\:]/g, '-').replace(/^-+/, '') : 
+      'default';
+    
+    // Create a project-specific database path
+    this.dbPath = path.join(os.homedir(), '.vscode', 'perl-extension-db', workspaceName);
     this.tableName = 'perl_code_embeddings';
     this.db = null;
     this.table = null;
@@ -117,7 +125,7 @@ class PerlVectorIndex {
             path:     r.path,
             cacheKey: r.cacheKey,
             "content":r.content,
-            "title":r.title,
+            "title":r.title.toLowerCase(),
             "samplevector":r.vector.slice(0, 5),
             "type":r.type
           })),
@@ -192,7 +200,7 @@ class PerlVectorIndex {
               path: file.path,
               cacheKey: file.cacheKey,
               content: structure.content,
-              title: structure.name,
+              title: (structure.name).toLowerCase(),
               vector: vector,
               type: structure.type
             });

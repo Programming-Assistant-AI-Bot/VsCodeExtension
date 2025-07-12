@@ -7,7 +7,7 @@ parser = getParser()
  */
 class PerlCodeStructureIndex {
   constructor() {
-    this.structures = new Map(); // filepath -> structures
+  this.structures = new Map(); // filepath -> structures
   }
 
   /**
@@ -57,7 +57,7 @@ class PerlCodeStructureIndex {
   _extractStructuresFromTree(node, contents, structures, parentPackage = '') {
     // Extract package declarations
     if (node.type === 'package_statement') {
-      // 1) extract the package name as before
+      // extract the package name 
       const packageNameNode = node.child(1);
       if (!packageNameNode) return;
       const packageName = contents.slice(
@@ -65,42 +65,6 @@ class PerlCodeStructureIndex {
         packageNameNode.endIndex
       );
       parentPackage = packageName;
-    
-      // 2) compute pkgStart
-      const pkgStart = node.startIndex;
-      
-      // 3) find the root (source_file)
-      let root = node;
-      while (root.parent) root = root.parent;
-      
-      // 4) get all package statements in order
-      const pkgs = root.namedChildren
-        .filter(n => n.type === 'package_statement')
-        .sort((a, b) => a.startIndex - b.startIndex);
-      
-      // 5) find this node's index
-      const myIndex = pkgs.findIndex(n => n === node);
-      
-      // 6) determine package end (next package or EOF)
-      let pkgEnd = contents.length;
-      if (myIndex >= 0 && myIndex < pkgs.length - 1) {
-        pkgEnd = pkgs[myIndex + 1].startIndex;
-      }
-      
-      // 7) Extract the full package content
-      const packageText = contents.substring(pkgStart, pkgEnd);
-      
-      console.log(`Package ${packageName} content length: ${packageText.length}`);
-      console.log(`Package content starts with: ${packageText.substring(0, 50)}...`);
-      
-      // 8) push to structures
-      structures.push({
-        name: packageName,
-        type: 'package',
-        content: packageText, // Use packageText instead of contents
-        range: { start: pkgStart, end: pkgEnd },
-        line: node.startPosition.row
-      });
     }
     
     // Extract subroutine declarations
@@ -125,17 +89,17 @@ class PerlCodeStructureIndex {
     }
   }
 
-  /**
+  /*
    * Extract code structures using regex patterns
    * @private
    */
   _extractStructuresWithRegex(contents, structures) {
-    // Extract package declarations
+    // Track package declarations without adding them as structures
     let currentPackage = '';
     const packageRegex = /^\s*package\s+([A-Za-z0-9:]+)\s*;/gm;
     let match;
     
-    // Collect all package declarations first
+    // Create a map of package ranges to determine current package context
     const packageRanges = [];
     while ((match = packageRegex.exec(contents)) !== null) {
       packageRanges.push({
@@ -144,35 +108,29 @@ class PerlCodeStructureIndex {
       });
     }
     
-    // Calculate package content ranges
+    // Process package ranges to define boundaries (but don't add to structures)
     for (let i = 0; i < packageRanges.length; i++) {
-      const pkg = packageRanges[i];
-      currentPackage = pkg.name;
-      
-      // End is either the next package or EOF
-      const endPos = (i < packageRanges.length - 1) 
+      packageRanges[i].end = (i < packageRanges.length - 1) 
         ? packageRanges[i + 1].start 
         : contents.length;
-      
-      const packageContent = contents.substring(pkg.start, endPos);
-      
-      console.log(`Regex: Package ${currentPackage} content length: ${packageContent.length}`);
-      
-      structures.push({
-        name: currentPackage,
-        type: 'package',
-        content: packageContent,
-        range: { start: pkg.start, end: endPos },
-        line: this._getLineNumber(contents, pkg.start)
-      });
     }
-
-    // Extract subroutines
+    
+    // Extract subroutines with proper package qualification
     const subRegex = /^\s*sub\s+([A-Za-z0-9_]+)(?:\s*\{|\s*$|\s*\([^)]*\)\s*\{)/gm;
     while ((match = subRegex.exec(contents)) !== null) {
-      // Find matching closing brace
       const subName = match[1];
       const startPos = match.index;
+      
+      // Determine which package this sub belongs to
+      currentPackage = '';
+      for (const pkg of packageRanges) {
+        if (startPos >= pkg.start && startPos < pkg.end) {
+          currentPackage = pkg.name;
+          break;
+        }
+      }
+      
+      // Find matching closing brace
       let braceCount = 0;
       let inComment = false;
       let endPos = startPos;
