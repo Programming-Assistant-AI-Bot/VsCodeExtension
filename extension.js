@@ -44,8 +44,11 @@ function createRequestKey(comment, doc, pos) {
 let codebaseIndexer = null;
 let outputChannel = null;
 let debounceTime = 3000;
+let errorCheckDebounceTime = 2000;
 // NEW: Diagnostic collection for displaying errors
 let errorDiagnostics = null;
+let errorCheckAbortController = new AbortController();
+
 // /**
 //  * Fetches code suggestion based on a comment
 //  * @param {string} comment - The user's comment
@@ -101,65 +104,66 @@ async function fetchCodeWithDeduplication(comment, doc, pos) {
 
 
 /**
- * NEW: Analyzes the entire document for errors and updates diagnostics
- * @param {vscode.TextDocument} doc - The document to check
+ * Analyzes the document for errors and underlines the entire line.
+ * @param {vscode.TextDocument} doc - The document to check.
  */
 async function updateErrorDiagnostics(doc) {
-    if (doc.languageId !== 'perl') {
-        return; // Only check Perl files
+  if (doc.languageId !== 'perl') return;
+
+  // Cancel any previous, still-running check to prevent "ghost errors"
+  errorCheckAbortController.abort();
+  errorCheckAbortController = new AbortController();
+  const signal = errorCheckAbortController.signal;
+
+  logInfo(`Running error check for: ${doc.fileName}`);
+  try {
+    const code = doc.getText();
+    const response = await checkCodeForErrors(code, signal);
+    const errors = response.data.errors;
+
+    if (!Array.isArray(errors)) {
+      logError("Received invalid error format from API.", errors);
+      return;
     }
 
-    logInfo(`Running error check for: ${doc.fileName}`);
-    try {
-        const code = doc.getText();
-        const lines = code.split('\n');
-        
-        // Create array of lines with their line numbers, including empty lines
-        // Create formatted string with padded line numbers
-        const totalLines = lines.length;
-        const padding = totalLines.toString().length;
-        const linesWithNumbers = lines
-            .map((text, index) => {
-                const lineNumber = (index + 1).toString().padStart(padding, ' ');
-                return `${lineNumber}: ${text}`;
-            })
-            .join('\n');
-        
+    // --- NEW LOGIC: Underline the entire line ---
+    const diagnostics = errors.map(error => {
+      // The API now returns only line and message.
+      const { line: errorLine, message } = error;
+      
+      // Convert 1-based line from AI to 0-based for VS Code.
+      const lineIndex = Math.max(0, errorLine - 1);
 
-        
-        // Send code with line numbers to backend
-        const response = await checkCodeForErrors(linesWithNumbers);
-        const errors = response.data.errors; // Assuming the errors are in response.data.errors
+      if (lineIndex >= doc.lineCount) {
+        logError(`API returned invalid line number: ${errorLine}`);
+        return null; // Skip this error if the line doesn't exist
+      }
 
-        if (!Array.isArray(errors)) {
-            logError("Received invalid error format from API.", errors);
-            return;
-        }
+      const lineText = doc.lineAt(lineIndex);
+      // Create a range that covers the entire line, from the first character to the last.
+      const range = new vscode.Range(
+        new vscode.Position(lineIndex, 0),
+        new vscode.Position(lineIndex, lineText.text.length)
+      );
+      
+      const diagnostic = new vscode.Diagnostic(range, message, vscode.DiagnosticSeverity.Error);
+      diagnostic.source = 'Perl AI Assistant';
+      return diagnostic;
+    }).filter(diag => diag !== null); // Filter out any null diagnostics
 
-        const diagnostics = errors.map(error => {
-            // VS Code lines are 0-indexed, API might return 1-indexed
-            const line = Math.max(0, error.line - 1);
-            const startChar = error.start || 0;
-            const endChar = error.end || Math.max(startChar + 1, lines[line]?.length || 0);
-            
-            const range = new vscode.Range(
-                new vscode.Position(line, startChar),
-                new vscode.Position(line, endChar)
-            );
-            
-            const diagnostic = new vscode.Diagnostic(range, error.message, vscode.DiagnosticSeverity.Error);
-            diagnostic.source = 'Perl AI Assistant';
-            return diagnostic;
-        });
+    errorDiagnostics.set(doc.uri, diagnostics);
+    logInfo(`Found ${diagnostics.length} errors.`);
 
-        errorDiagnostics.set(doc.uri, diagnostics);
-        logInfo(`Found ${diagnostics.length} errors.`);
-
-    } catch (err) {
-        logInfo(`Failed to check for errors: ${err.message}`, err);
-        // Do not show an error message to the user to avoid being disruptive
+  } catch (err) {
+    // If the error was due to cancellation, it's expected, so we just log it quietly.
+    if (err.name === 'CanceledError' || err.name === 'AbortError') {
+      logInfo('Error check was cancelled because a new one was started.');
+    } else {
+      logInfo(`Failed to check for errors: ${err.message}`);
     }
+  }
 }
+
 
 
 
@@ -344,21 +348,14 @@ async function activate(context) {
   // Create debounced version of fetchCode
   const debouncedFetch = debounce(fetchCodeWithDeduplication, debounceTime);
 
-  // NEW: Create a debounced version of the error checker
   const debouncedErrorCheck = debounce(
       (doc) => updateErrorDiagnostics(doc), 
-      config.errorCheckDebounceTime
+      errorCheckDebounceTime
   );
-  logInfo("Step 4: Debounced functions created.");
 
-  // NEW: Initialize Diagnostics Collection
-  logInfo("Step 5: Initializing diagnostics collection...");
   errorDiagnostics = vscode.languages.createDiagnosticCollection("perl-ai-errors");
   context.subscriptions.push(errorDiagnostics);
-  logInfo("Step 5: Diagnostics collection initialized.");
 
-  // NEW: Register event listener for when a text document is changed
-  logInfo("Step 6: Registering event listeners...");
   context.subscriptions.push(
       vscode.workspace.onDidChangeTextDocument(event => {
           if (vscode.window.activeTextEditor && event.document === vscode.window.activeTextEditor.document) {
@@ -367,37 +364,31 @@ async function activate(context) {
       })
   );
 
-  // NEW: Register event listener for when the active editor changes
   context.subscriptions.push(
       vscode.window.onDidChangeActiveTextEditor(editor => {
           if (editor) {
-              // Trigger an immediate check when switching to a new file
               debouncedErrorCheck(editor.document);
           }
       })
   );
-  logInfo("Step 6: Event listeners registered.");
 
-  // NEW: Clear diagnostics when a document is closed
   context.subscriptions.push(
       vscode.workspace.onDidCloseTextDocument(doc => errorDiagnostics.delete(doc.uri))
   );
 
-  // Initial check for the currently active file, if any
-  logInfo("Step 7: Performing initial check for active editor...");
   if (vscode.window.activeTextEditor) {
       debouncedErrorCheck(vscode.window.activeTextEditor.document);
   }
-  logInfo("Step 7: Initial check complete.");
 
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration(e => {
-      if (e.affectsConfiguration('perlCodeGeneration')) {
+      if (e.affectsConfiguration('perlCodeGeneration')) { // FIX: Corrected typo 'perlCodegeneration'
         loadConfiguration();
         logInfo("Configuration updated", config);
       }
     })
   );
+
 
   const inlineCompletionProvider = {
     async provideInlineCompletionItems(doc, pos) {
@@ -438,61 +429,90 @@ async function activate(context) {
   
   logInfo("Extension setup complete");
 
-  const processSelectionForSidebar = debounce(async (event) => {
-    const selection = event.selections[0];
-    const doc = event.textEditor.document;
+// Add these variables at the top with other global state
+let lastSelectedText = '';
+let lastSuggestions = [];
 
-    // Handle non-Perl files first
-    if (doc.languageId !== 'perl') {
-        logInfo(`Skipping suggestion for non-Perl file: ${doc.languageId}`);
-        // Display an error message if it's not a Perl file
-        treeProvider.refresh([`Error: Only Perl code suggestions are supported. Current file is a '${doc.languageId}' file.`]);
-        return; 
-    }
-    
-    if (!selection || selection.isEmpty) {
-        treeProvider.refresh([]); // Clear sidebar if selection is empty in a Perl file
-        return;
-    }
+// Replace the processSelectionForSidebar function with this improved version
+const processSelectionForSidebar = debounce(async (event) => {
+  const selection = event.selections[0];
+  const doc = event.textEditor.document;
 
-    const selectedText = doc.getText(selection);
+  // Enhanced Perl file detection - check both languageId and file extension
+  const isPerlFile = doc.languageId === 'perl' || 
+                     doc.fileName.endsWith('.pl') || 
+                     doc.fileName.endsWith('.pm') || 
+                     doc.fileName.endsWith('.t');
 
-    if (selectedText.trim()) {
-      try {
-        logInfo("Sending request to backend for alternative suggestions...");
-        
-        const response = await api.post('/altCode/', { code: selectedText });
-        
-        const alternatives = response.data.alternatives || [];
-        
-        const suggestionsForSidebar = alternatives.map(item => item.code);
-
-        if (suggestionsForSidebar.length === 0) {
-            suggestionsForSidebar.push("No specific code suggestions received from AI, or response format was unexpected.");
-        }
-
-        treeProvider.refresh(suggestionsForSidebar); 
-        logInfo("Sidebar refreshed with backend suggestions.");
-
-      } catch (err) {
-        logError('Failed to fetch alternative suggestions from backend', err);
-        
-        let userFacingErrorMessage = "An unexpected error occurred. Please check the Debug Console for details.";
-
-        if (err.code === 'ECONNREFUSED') {
-            userFacingErrorMessage = "Error: Backend server is not running. Please start your FastAPI backend.";
-        } else if (err.response && err.response.data && err.response.data.alternatives && err.response.data.alternatives.length > 0) {
-            userFacingErrorMessage = `Backend Error: ${err.response.data.alternatives[0].code}`;
-        } else if (err.message) {
-            userFacingErrorMessage = `Error fetching suggestions: ${err.message}`;
-        }
-
-        treeProvider.refresh([userFacingErrorMessage]);
+  // Handle non-Perl files first
+  if (!isPerlFile) {
+      logInfo(`Skipping suggestion for non-Perl file: ${doc.languageId}, filename: ${doc.fileName}`);
+      treeProvider.refresh([`Error: Only Perl code suggestions are supported. Current file is a '${doc.languageId}' file (${doc.fileName}).`]);
+      return; 
+  }
+  
+  if (!selection || selection.isEmpty) {
+      // Don't clear immediately - only clear if we had no previous selection
+      if (lastSelectedText === '') {
+          treeProvider.refresh([]);
       }
-    } else {
-        treeProvider.refresh([]); 
+      return;
+  }
+
+  const selectedText = doc.getText(selection);
+  
+  // If the selected text is the same as last time, don't make a new request
+  if (selectedText.trim() === lastSelectedText.trim() && lastSuggestions.length > 0) {
+      logInfo("Using cached suggestions for same selection");
+      treeProvider.refresh(lastSuggestions);
+      return;
+  }
+
+  if (selectedText.trim()) {
+    try {
+      logInfo("Sending request to backend for alternative suggestions...");
+      
+      const response = await api.post('/altCode/', { code: selectedText });
+      
+      const alternatives = response.data.alternatives || [];
+      
+      const suggestionsForSidebar = alternatives.map(item => item.code);
+
+      if (suggestionsForSidebar.length === 0) {
+          suggestionsForSidebar.push("No specific code suggestions received from AI, or response format was unexpected.");
+      }
+
+      // Cache the results
+      lastSelectedText = selectedText.trim();
+      lastSuggestions = suggestionsForSidebar;
+      
+      treeProvider.refresh(suggestionsForSidebar); 
+      logInfo("Sidebar refreshed with backend suggestions.");
+
+    } catch (err) {
+      logError('Failed to fetch alternative suggestions from backend', err);
+      
+      let userFacingErrorMessage = "An unexpected error occurred. Please check the Debug Console for details.";
+
+      if (err.code === 'ECONNREFUSED') {
+          userFacingErrorMessage = "Error: Backend server is not running. Please start your FastAPI backend.";
+      } else if (err.response && err.response.data && err.response.data.alternatives && err.response.data.alternatives.length > 0) {
+          userFacingErrorMessage = `Backend Error: ${err.response.data.alternatives[0].code}`;
+      } else if (err.message) {
+          userFacingErrorMessage = `Error fetching suggestions: ${err.message}`;
+      }
+
+      treeProvider.refresh([userFacingErrorMessage]);
     }
-  }, config.debounceTime); 
+  } else {
+      // Only clear if we're moving away from a selection
+      if (lastSelectedText !== '') {
+          lastSelectedText = '';
+          lastSuggestions = [];
+          treeProvider.refresh([]);
+      }
+  }
+}, debounceTime); 
   context.subscriptions.push(
     vscode.window.onDidChangeTextEditorSelection(processSelectionForSidebar)
   );

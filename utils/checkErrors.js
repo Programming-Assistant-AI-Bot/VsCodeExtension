@@ -2,17 +2,17 @@ const api = require("../api/api")
 
 /**
  * Sends Perl code to the backend to be checked for errors.
- * This function uses the pre-configured 'api' instance.
+ * This function now accepts an AbortSignal to allow for request cancellation.
  * @param {string} code - The Perl code string to analyze.
- * @returns {Promise<object>} The full response from the API. The actual data
- * will be in the .data property of the response,
- * which is expected to contain an 'errors' array.
+ * @param {AbortSignal} signal - The signal to cancel the request.
+ * @returns {Promise<object>} The full response from the API.
  */
-const checkCodeForErrors = (code) => {
-  // 2. Use the 'api' instance to make the POST request.
-  //    The endpoint '/checkErrors/' will be appended to the baseURL.
-  return api.post('/checkErrors/', { code });
+const checkCodeForErrors = (code, signal) => {
+  // Use the correct endpoint and pass the signal.
+  // If the signal is aborted elsewhere, Axios will cancel this request.
+  return api.post('/checkErrors/', { code }, { signal });
 };
+
 
 // 3. Export both the 'api' instance for general use and the specific
 //    'checkCodeForErrors' function for its dedicated task.
