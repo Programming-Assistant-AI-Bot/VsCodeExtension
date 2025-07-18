@@ -34,6 +34,10 @@
         "title": "Perl: Index Codebase"
       },
       {
+        "command": "perlcodegeneration.showSuggestions",
+        "title": "Perl: Show Suggestions"
+      },
+      {
         "command": "perlcodegeneration.debugModuleNames",
         "title": "Perl: debugName"
       },
@@ -66,6 +70,24 @@
           "description": "Use in-memory index instead of LanceDB for module resolution"
         }
       }
+    },
+    "viewsContainers": { 
+      "activitybar": [
+        {
+          "id": "perlCodeGen-alternativeSuggestionsContainer", 
+          "title": "Perl Suggestions", 
+          "icon": "$(lightbulb)"
+        }
+      ]
+    },
+    "views": {
+      "perlCodeGen-alternativeSuggestionsContainer": [ 
+        {
+          "id": "perlCodeGen.alternativeSuggestions", 
+          "name": "", 
+          "icon": "$(lightbulb)" 
+        }
+      ]
     }
   },
   "scripts": {
@@ -79,15 +101,17 @@
     "@types/vscode": "^1.99.0",
     "@vscode/test-cli": "^0.0.10",
     "@vscode/test-electron": "^2.4.1",
-    "eslint": "^9.23.0"
+    "eslint": "^9.23.0",
+    "vscode": "^1.1.37"
   },
   "dependencies": {
     "@ganezdragon/tree-sitter-perl": "^1.1.1",
     "@lancedb/lancedb": "^0.19.0",
     "@xenova/transformers": "^2.17.2",
-    "axios": "^1.8.4",
+    "axios": "^1.10.0",
     "glob": "^11.0.2",
     "tree-sitter": "^0.21.0",
     "vscode-uri": "^3.1.0"
   }
 }
+
