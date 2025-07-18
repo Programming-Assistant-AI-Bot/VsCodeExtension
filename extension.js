@@ -9,6 +9,7 @@ const debounce = require('./utils/debounce');
 const { PerlCodebaseIndexer } = require('./indexers/codebaseIndexer');
 const { PerlRepositoryMapProvider } = require('./collectors/repoMapProvider');
 const { registerCommands } = require('./commands/commands')
+const checkCodeForErrors  = require('./utils/checkErrors')
 
 /**
  * Global extension configuration
@@ -16,33 +17,151 @@ const { registerCommands } = require('./commands/commands')
 const config = {
   // Default values, will be overridden by user settings
   relevantCodeCount: 2,
+  // NEW: Debounce time for error checking (in milliseconds)
+  errorCheckDebounceTime: 2000, // 2 seconds, you can set this to 10000 for 10 seconds
   useMemoryIndex:true,
   indexOnStartup: true,
   contextWindowSize: 15, // lines around cursor to consider for context
 };
 
-// Global state
-let codebaseIndexer = null;
-let outputChannel = null;
-let debounceTime = 2000;
+// Global state for tracking in-flight requests
+const inFlightRequests = new Map();
+
+
 /**
- * Fetches code suggestion based on a comment
+ * Creates a unique key for a request based on comment and context
  * @param {string} comment - The user's comment
  * @param {vscode.TextDocument} doc - Current document
  * @param {vscode.Position} pos - Current cursor position
- * @returns {Promise<string>} Generated code suggestion
+ * @returns {string} Unique key for the request
  */
-async function fetchCode(comment, doc, pos) {
-  try {
-    const ctx = await generateContextForComments(comment, doc, pos);
-    const response = await api.post('/commentCode/', { message: comment, context: ctx });
-    return response.data.code;
-  } catch (err) {
-    logError(`Error fetching suggestion: ${err.message}`, err);
-    vscode.window.showErrorMessage(`Failed to generate code: ${err.message}`);
-    return null;
-  }
+function createRequestKey(comment, doc, pos) {
+  // Create a unique key that represents this specific request
+  return `${doc.fileName}:${pos.line}:${pos.character}:${comment.trim()}`;
 }
+
+// Global state
+let codebaseIndexer = null;
+let outputChannel = null;
+let debounceTime = 3000;
+// NEW: Diagnostic collection for displaying errors
+let errorDiagnostics = null;
+// /**
+//  * Fetches code suggestion based on a comment
+//  * @param {string} comment - The user's comment
+//  * @param {vscode.TextDocument} doc - Current document
+//  * @param {vscode.Position} pos - Current cursor position
+//  * @returns {Promise<string>} Generated code suggestion
+//  */
+// async function fetchCode(comment, doc, pos) {
+//   try {
+//     const ctx = await generateContextForComments(comment, doc, pos);
+//     const response = await api.post('/commentCode/', { message: comment, context: ctx });
+//     return response.data.code;
+//   } catch (err) {
+//     logError(`Error fetching suggestion: ${err.message}`, err);
+//     vscode.window.showErrorMessage(`Failed to generate code: ${err.message}`);
+//     return null;
+//   }
+// }
+
+async function fetchCodeWithDeduplication(comment, doc, pos) {
+  const requestKey = createRequestKey(comment, doc, pos);
+  
+  // Check if we already have a request in progress for this exact same input
+  if (inFlightRequests.has(requestKey)) {
+    logDebug(`Returning existing promise for request: ${requestKey}`);
+    return inFlightRequests.get(requestKey);
+  }
+  
+  // Create new promise for this request
+  const requestPromise = (async () => {
+    try {
+      logDebug(`Starting new request: ${requestKey}`);
+      const ctx = await generateContextForComments(comment, doc, pos);
+      const response = await api.post('/commentCode/', { message: comment, context: ctx });
+      logDebug(`Request completed: ${requestKey}`);
+      return response.data.code;
+    } catch (err) {
+      logError(`Error fetching suggestion for ${requestKey}: ${err.message}`, err);
+      vscode.window.showErrorMessage(`Failed to generate code: ${err.message}`);
+      return null;
+    } finally {
+      // Always clean up the request from the map when it's done
+      inFlightRequests.delete(requestKey);
+      logDebug(`Cleaned up request: ${requestKey}`);
+    }
+  })();
+  
+  // Store the promise in our map
+  inFlightRequests.set(requestKey, requestPromise);
+  
+  return requestPromise;
+}
+
+
+/**
+ * NEW: Analyzes the entire document for errors and updates diagnostics
+ * @param {vscode.TextDocument} doc - The document to check
+ */
+async function updateErrorDiagnostics(doc) {
+    if (doc.languageId !== 'perl') {
+        return; // Only check Perl files
+    }
+
+    logInfo(`Running error check for: ${doc.fileName}`);
+    try {
+        const code = doc.getText();
+        const lines = code.split('\n');
+        
+        // Create array of lines with their line numbers, including empty lines
+        // Create formatted string with padded line numbers
+        const totalLines = lines.length;
+        const padding = totalLines.toString().length;
+        const linesWithNumbers = lines
+            .map((text, index) => {
+                const lineNumber = (index + 1).toString().padStart(padding, ' ');
+                return `${lineNumber}: ${text}`;
+            })
+            .join('\n');
+        
+
+        
+        // Send code with line numbers to backend
+        const response = await checkCodeForErrors(linesWithNumbers);
+        const errors = response.data.errors; // Assuming the errors are in response.data.errors
+
+        if (!Array.isArray(errors)) {
+            logError("Received invalid error format from API.", errors);
+            return;
+        }
+
+        const diagnostics = errors.map(error => {
+            // VS Code lines are 0-indexed, API might return 1-indexed
+            const line = Math.max(0, error.line - 1);
+            const startChar = error.start || 0;
+            const endChar = error.end || Math.max(startChar + 1, lines[line]?.length || 0);
+            
+            const range = new vscode.Range(
+                new vscode.Position(line, startChar),
+                new vscode.Position(line, endChar)
+            );
+            
+            const diagnostic = new vscode.Diagnostic(range, error.message, vscode.DiagnosticSeverity.Error);
+            diagnostic.source = 'Perl AI Assistant';
+            return diagnostic;
+        });
+
+        errorDiagnostics.set(doc.uri, diagnostics);
+        logInfo(`Found ${diagnostics.length} errors.`);
+
+    } catch (err) {
+        logInfo(`Failed to check for errors: ${err.message}`, err);
+        // Do not show an error message to the user to avoid being disruptive
+    }
+}
+
+
 
 /**
  * Collects and generates context for AI code generation
@@ -226,8 +345,55 @@ async function activate(context) {
     });
   }, 300);
 
+
   // Create debounced version of fetchCode
-  const debouncedFetch = debounce(fetchCode, debounceTime);
+  const debouncedFetch = debounce(fetchCodeWithDeduplication, debounceTime);
+
+  // NEW: Create a debounced version of the error checker
+  const debouncedErrorCheck = debounce(
+      (doc) => updateErrorDiagnostics(doc), 
+      config.errorCheckDebounceTime
+  );
+  logInfo("Step 4: Debounced functions created.");
+
+  // NEW: Initialize Diagnostics Collection
+  logInfo("Step 5: Initializing diagnostics collection...");
+  errorDiagnostics = vscode.languages.createDiagnosticCollection("perl-ai-errors");
+  context.subscriptions.push(errorDiagnostics);
+  logInfo("Step 5: Diagnostics collection initialized.");
+
+  // NEW: Register event listener for when a text document is changed
+  logInfo("Step 6: Registering event listeners...");
+  context.subscriptions.push(
+      vscode.workspace.onDidChangeTextDocument(event => {
+          if (vscode.window.activeTextEditor && event.document === vscode.window.activeTextEditor.document) {
+              debouncedErrorCheck(event.document);
+          }
+      })
+  );
+
+  // NEW: Register event listener for when the active editor changes
+  context.subscriptions.push(
+      vscode.window.onDidChangeActiveTextEditor(editor => {
+          if (editor) {
+              // Trigger an immediate check when switching to a new file
+              debouncedErrorCheck(editor.document);
+          }
+      })
+  );
+  logInfo("Step 6: Event listeners registered.");
+
+  // NEW: Clear diagnostics when a document is closed
+  context.subscriptions.push(
+      vscode.workspace.onDidCloseTextDocument(doc => errorDiagnostics.delete(doc.uri))
+  );
+
+  // Initial check for the currently active file, if any
+  logInfo("Step 7: Performing initial check for active editor...");
+  if (vscode.window.activeTextEditor) {
+      debouncedErrorCheck(vscode.window.activeTextEditor.document);
+  }
+  logInfo("Step 7: Initial check complete.");
 
   // Register configuration change listener
   context.subscriptions.push(
