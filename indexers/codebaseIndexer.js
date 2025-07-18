@@ -17,8 +17,7 @@ class PerlCodebaseIndexer {
     this.workspace = workspace;
     this.fileWatcher = fileWatcher;
     this.structureIndex = new PerlCodeStructureIndex();
-    this.vectorIndex = new PerlVectorIndex(this.structureIndex);
-    
+    this.vectorIndex = new PerlVectorIndex(this.structureIndex, workspace);    
     // Create output channel for logging
     this.outputChannel = vscode.window.createOutputChannel('Perl Indexer');
     

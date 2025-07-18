@@ -30,29 +30,28 @@
         "title": "Perl: Find Relevant Code"
       },
       {
-        "command": "perlcodegeneration.getImports",
-        "title": "Perl: Analyze Imports"
-      },
-      {
         "command": "perlcodegeneration.indexCodebase",
         "title": "Perl: Index Codebase"
       },
       {
         "command": "perlcodegeneration.showSuggestions",
         "title": "Perl: Show Suggestions"
+      },
+      {
+        "command": "perlcodegeneration.debugModuleNames",
+        "title": "Perl: debugName"
+      },
+      {
+        "command": "perlcodegeneration.getImports",
+        "title": "Perl: debugImports"
       }
     ],
     "configuration": {
       "title": "Perl Code Generation",
       "properties": {
-        "perlCodeGeneration.debounceTime": {
-          "type": "number",
-          "default": 500,
-          "description": "Time in milliseconds to wait before generating code after typing stops"
-        },
         "perlCodeGeneration.relevantCodeCount": {
           "type": "number",
-          "default": 5,
+          "default": 3,
           "description": "Number of relevant code examples to retrieve"
         },
         "perlCodeGeneration.indexOnStartup": {
@@ -64,6 +63,11 @@
           "type": "number",
           "default": 15,
           "description": "Number of lines to consider around cursor for context"
+        },
+        "perlCodeGeneration.useMemoryIndex": {
+          "type": "boolean",
+          "default": true,
+          "description": "Use in-memory index instead of LanceDB for module resolution"
         }
       }
     },

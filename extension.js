@@ -3,7 +3,7 @@ const api = require('./api/api');
 const { initTreeSitter, getParser } = require('./parsers/treeSitter');
 const ContextCollector = require('./collectors/contextCollector');
 const DefinitionCollector = require('./collectors/definitionCollector');
-const {  PerlImportDefAnalyzer, analyzeImportsForCurrentFileWithLanceDB} = require('./collectors/importDefinitionAnalyzer')
+const {  PerlImportDefAnalyzer } = require('./collectors/importDefinitionAnalyzer')
 const  PerlImportAnalyzer  = require('./collectors/perlImportAnalyzer')
 const debounce = require('./utils/debounce');
 const { PerlCodebaseIndexer } = require('./indexers/codebaseIndexer');
@@ -15,7 +15,8 @@ const { AlternativeSuggestionsProvider } = require('./sidebarProvider');
  */
 const config = {
   debounceTime: 500, 
-  relevantCodeCount: 5,
+  relevantCodeCount: 2,
+  useMemoryIndex:true,
   indexOnStartup: true,
   contextWindowSize: 15, 
 };
@@ -23,7 +24,7 @@ const config = {
 // Global state
 let codebaseIndexer = null;
 let outputChannel = null;
-
+let debounceTime = 2000;
 /**
  * Fetches code suggestion based on a comment
  * @param {string} comment - The user's comment
@@ -50,65 +51,65 @@ async function fetchCode(comment, doc, pos) {
  * @param {vscode.Position} pos - Current cursor position
  * @returns {Promise<object>} Context object with code information
  */
-async function generateContextForComments(comment, doc, pos) {
-  try {
-    // Only initialize analyzer if codebaseIndexer exists
-    const analyzer = codebaseIndexer ? 
-      new PerlImportDefAnalyzer(codebaseIndexer.vectorIndex) : null;
+  async function generateContextForComments(comment, doc, pos) {
+    try {
+      // Create analyzer - either memory-based or LanceDB-based depending on config
+      let analyzer = new PerlImportDefAnalyzer();
+      // Basic context that doesn't require the indexer
+      const codeCtx = ContextCollector.getCodeAround(doc, pos);
+      const block = await ContextCollector.getCurrentBlock(doc, pos);
+      const imports = PerlImportAnalyzer.extractImports(doc.getText());
+      const used = PerlImportAnalyzer.findUsedSymbols(codeCtx.textAroundCursor, imports);
+      
+      const varDefs = await DefinitionCollector.findVariableDefinitions(
+        doc,
+        new vscode.Range(new vscode.Position(0, 0), doc.lineAt(doc.lineCount - 1).range.end)
+      );
 
-    // Basic context that doesn't require the indexer
-    const codeCtx = ContextCollector.getCodeAround(doc, pos);
-    const block = await ContextCollector.getCurrentBlock(doc, pos);
-    const imports = PerlImportAnalyzer.extractImports(doc.getText());
-    const used = PerlImportAnalyzer.findUsedSymbols(codeCtx.textAroundCursor, imports);
-    
-    const varDefs = await DefinitionCollector.findVariableDefinitions(
-      doc,
-      new vscode.Range(new vscode.Position(0, 0), doc.lineAt(doc.lineCount - 1).range.end)
-    );
+      // Context payload with mandatory fields
+      const ctxPayload = {
+        codePrefix: codeCtx.fullPrefix,
+        codeSuffix: codeCtx.fullSuffix,
+        currentBlock: block,
+        imports: imports,
+        usedModules: used,
+        variableDefinitions: varDefs,
+        fileName: doc.fileName,
+      };
 
-    const ctxPayload = {
-      codePrefix: codeCtx.fullPrefix,
-      codeSuffix: codeCtx.fullSuffix,
-      currentBlock: block,
-      imports: imports,
-      usedModules: used,
-      variableDefinitions: varDefs,
-      fileName: doc.fileName,
-    };
-
-    // Optional context that requires the indexer
-    if (codebaseIndexer) {
-      try {
-        ctxPayload.projectStructure = await PerlRepositoryMapProvider.generateTreeMap();
-        
-        if (analyzer) {
-          ctxPayload.importDefinitions = await analyzer.getImportDefinitionsFromLanceDB(doc);
+      // Get import definitions using the chosen analyzer
+      if (analyzer) {
+        try {
+          ctxPayload.projectStructure = await PerlRepositoryMapProvider.generateTreeMap();
+          
+          ctxPayload.importDefinitions = await analyzer.getImportDefinitions(doc);
+          
+          // Get relevant code (works with either approach)
+          if (codebaseIndexer) {
+            ctxPayload.relatedCodeStructures = await codebaseIndexer.findRelevantCode(
+              comment, 
+              config.relevantCodeCount
+            );
+          }
+        } catch (indexerErr) {
+          logError('Error getting advanced context:', indexerErr);
+          // Continue with basic context if advanced context fails
         }
-        
-        ctxPayload.relatedCodeStructures = await codebaseIndexer.findRelevantCode(
-          comment, 
-          config.relevantCodeCount
-        );
-      } catch (indexerErr) {
-        logError('Error getting advanced context:', indexerErr);
       }
-    }
 
-    logDebug('Context generated:', ctxPayload);
-    return ctxPayload;
-  } catch (err) {
-    logError('Error generating context:', err);
-    throw new Error(`Failed to generate context: ${err.message}`);
+      logDebug('Context generated:', ctxPayload);
+      return ctxPayload;
+    } catch (err) {
+      logError('Error generating context:', err);
+      throw new Error(`Failed to generate context: ${err.message}`);
+    }
   }
-}
 
 /**
  * Loads extension configuration from settings
  */
 function loadConfiguration() {
   const settings = vscode.workspace.getConfiguration('perlCodeGeneration');
-  config.debounceTime = settings.get('debounceTime', config.debounceTime);
   config.relevantCodeCount = settings.get('relevantCodeCount', config.relevantCodeCount);
   config.indexOnStartup = settings.get('indexOnStartup', config.indexOnStartup);
   config.contextWindowSize = settings.get('contextWindowSize', config.contextWindowSize);
@@ -218,7 +219,7 @@ async function activate(context) {
         logInfo("Codebase indexer initialized successfully");
       }
     });
-  }, 500);
+  }, 300);
 
   const debouncedFetch = debounce(fetchCode, config.debounceTime);
 
@@ -237,7 +238,7 @@ async function activate(context) {
       if (!line.trim().startsWith('#')) return { items: [] };
       
       const comment = line.replace(/^(\s*#\s?)/, '').trim();
-      if (!comment) return { items: [] };
+      if (!comment || comment.length < 3) return { items: [] };
 
       const suggestion = await debouncedFetch(comment, doc, pos);
 

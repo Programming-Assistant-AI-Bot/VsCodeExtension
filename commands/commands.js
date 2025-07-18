@@ -1,11 +1,11 @@
 const vscode = require('vscode');
-const { analyzeImportsForCurrentFileWithLanceDB } = require('../collectors/importDefinitionAnalyzer');
+const { analyzeImportsForCurrentFile } = require('../collectors/importDefinitionAnalyzer');
 const { PerlRepositoryMapProvider } = require('../collectors/repoMapProvider');
 const ContextCollector = require('../collectors/contextCollector');
 const DefinitionCollector = require('../collectors/definitionCollector');
-const { PerlImportDefAnalyzer } = require('../collectors/importDefinitionAnalyzer');
 const PerlImportAnalyzer = require('../collectors/perlImportAnalyzer')
 const { getParser } = require('../parsers/treeSitter');
+const { debugModuleNames } = require('../collectors/importDefinitionAnalyzer');
 
 /**
  * Registers all commands for the extension.
@@ -204,33 +204,6 @@ function registerCommands(context, { config, logError, logInfo, initializeCodeba
       }
     })
   );
-
-  // Command: Get imports
-  context.subscriptions.push(
-    vscode.commands.registerCommand('perlcodegeneration.getImports', async () => {
-      const indexer = getCodebaseIndexer();
-      if (!indexer) {
-        vscode.window.showInformationMessage('Codebase indexer not initialized. Run "Index Perl Codebase" first.');
-        return;
-      }
-  
-      try {
-        const results = await analyzeImportsForCurrentFileWithLanceDB(indexer.vectorIndex);
-        
-        if (results) {
-          const out = vscode.window.createOutputChannel('Perl Imports (LanceDB)');
-          out.clear();
-          out.appendLine('\n## Imports\n' + JSON.stringify(results, null, 2));
-          out.show();
-        } else {
-          vscode.window.showInformationMessage('No import information found');
-        }
-      } catch (error) {
-        logError('Error analyzing imports:', error);
-        vscode.window.showErrorMessage(`Failed to analyze imports: ${error.message}`);
-      }
-    })
-  );
   
   // New Command: Index Perl Codebase (on-demand)
   context.subscriptions.push(
@@ -259,6 +232,49 @@ function registerCommands(context, { config, logError, logInfo, initializeCodeba
       } catch (error) {
         logError('Error indexing codebase:', error);
         vscode.window.showErrorMessage(`Failed to index codebase: ${error.message}`);
+      }
+    })
+  );
+
+  // Command: Debug Module Names
+  context.subscriptions.push(
+    vscode.commands.registerCommand('perlcodegeneration.debugModuleNames', async () => {
+      const indexer = getCodebaseIndexer();
+      if (!indexer) {
+        vscode.window.showInformationMessage('Codebase indexer not initialized. Run "Index Perl Codebase" first.');
+        return;
+      }
+
+      try {
+        await debugModuleNames(indexer.vectorIndex);
+        vscode.window.showInformationMessage('Module names debug complete. Check Output console for results.');
+      } catch (error) {
+        logError('Error debugging module names:', error);
+        vscode.window.showErrorMessage(`Failed to debug module names: ${error.message}`);
+      }
+    })
+  );
+
+  // Command to get imports (with option for memory-based index)
+  context.subscriptions.push(
+    vscode.commands.registerCommand('perlcodegeneration.getImports', async () => {
+      try {
+        let results;
+        // Use memory-based approach
+        results = await analyzeImportsForCurrentFile();
+        
+        if (results) {
+          const out = vscode.window.createOutputChannel('Perl Imports');
+          out.clear();
+          out.appendLine(`\n## Imports (using Memory Index)\n` + 
+                          JSON.stringify(results, null, 2));
+          out.show();
+        } else {
+          vscode.window.showInformationMessage('No import information found');
+        }
+      } catch (error) {
+        logError('Error analyzing imports:', error);
+        vscode.window.showErrorMessage(`Failed to analyze imports: ${error.message}`);
       }
     })
   );
