@@ -9,6 +9,7 @@ const debounce = require('./utils/debounce');
 const { PerlCodebaseIndexer } = require('./indexers/codebaseIndexer');
 const { PerlRepositoryMapProvider } = require('./collectors/repoMapProvider');
 const { registerCommands } = require('./commands/commands')
+const checkCodeForErrors  = require('./utils/checkErrors')
 const { AlternativeSuggestionsProvider } = require('./sidebarProvider');
 /**
  * Global extension configuration
@@ -16,33 +17,155 @@ const { AlternativeSuggestionsProvider } = require('./sidebarProvider');
 const config = {
   debounceTime: 500, 
   relevantCodeCount: 2,
+  // NEW: Debounce time for error checking (in milliseconds)
+  errorCheckDebounceTime: 2000, // 2 seconds, you can set this to 10000 for 10 seconds
   useMemoryIndex:true,
   indexOnStartup: true,
   contextWindowSize: 15, 
 };
 
-// Global state
-let codebaseIndexer = null;
-let outputChannel = null;
-let debounceTime = 2000;
+// Global state for tracking in-flight requests
+const inFlightRequests = new Map();
+
+
 /**
- * Fetches code suggestion based on a comment
+ * Creates a unique key for a request based on comment and context
  * @param {string} comment - The user's comment
  * @param {vscode.TextDocument} doc - Current document
  * @param {vscode.Position} pos - Current cursor position
- * @returns {Promise<string>} Generated code suggestion
+ * @returns {string} Unique key for the request
  */
-async function fetchCode(comment, doc, pos) {
+function createRequestKey(comment, doc, pos) {
+  // Create a unique key that represents this specific request
+  return `${doc.fileName}:${pos.line}:${pos.character}:${comment.trim()}`;
+}
+
+// Global state
+let codebaseIndexer = null;
+let outputChannel = null;
+let debounceTime = 3000;
+let errorCheckDebounceTime = 2000;
+// NEW: Diagnostic collection for displaying errors
+let errorDiagnostics = null;
+let errorCheckAbortController = new AbortController();
+
+// /**
+//  * Fetches code suggestion based on a comment
+//  * @param {string} comment - The user's comment
+//  * @param {vscode.TextDocument} doc - Current document
+//  * @param {vscode.Position} pos - Current cursor position
+//  * @returns {Promise<string>} Generated code suggestion
+//  */
+// async function fetchCode(comment, doc, pos) {
+//   try {
+//     const ctx = await generateContextForComments(comment, doc, pos);
+//     const response = await api.post('/commentCode/', { message: comment, context: ctx });
+//     return response.data.code;
+//   } catch (err) {
+//     logError(`Error fetching suggestion: ${err.message}`, err);
+//     vscode.window.showErrorMessage(`Failed to generate code: ${err.message}`);
+//     return null;
+//   }
+// }
+
+async function fetchCodeWithDeduplication(comment, doc, pos) {
+  const requestKey = createRequestKey(comment, doc, pos);
+  
+  // Check if we already have a request in progress for this exact same input
+  if (inFlightRequests.has(requestKey)) {
+    logDebug(`Returning existing promise for request: ${requestKey}`);
+    return inFlightRequests.get(requestKey);
+  }
+  
+  // Create new promise for this request
+  const requestPromise = (async () => {
+    try {
+      logDebug(`Starting new request: ${requestKey}`);
+      const ctx = await generateContextForComments(comment, doc, pos);
+      const response = await api.post('/commentCode/', { message: comment, context: ctx });
+      logDebug(`Request completed: ${requestKey}`);
+      return response.data.code;
+    } catch (err) {
+      logError(`Error fetching suggestion for ${requestKey}: ${err.message}`, err);
+      vscode.window.showErrorMessage(`Failed to generate code: ${err.message}`);
+      return null;
+    } finally {
+      // Always clean up the request from the map when it's done
+      inFlightRequests.delete(requestKey);
+      logDebug(`Cleaned up request: ${requestKey}`);
+    }
+  })();
+  
+  // Store the promise in our map
+  inFlightRequests.set(requestKey, requestPromise);
+  
+  return requestPromise;
+}
+
+
+/**
+ * Analyzes the document for errors and underlines the entire line.
+ * @param {vscode.TextDocument} doc - The document to check.
+ */
+async function updateErrorDiagnostics(doc) {
+  if (doc.languageId !== 'perl') return;
+
+  // Cancel any previous, still-running check to prevent "ghost errors"
+  errorCheckAbortController.abort();
+  errorCheckAbortController = new AbortController();
+  const signal = errorCheckAbortController.signal;
+
+  logInfo(`Running error check for: ${doc.fileName}`);
   try {
-    const ctx = await generateContextForComments(comment, doc, pos);
-    const response = await api.post('/commentCode/', { message: comment, context: ctx });
-    return response.data.code;
+    const code = doc.getText();
+    const response = await checkCodeForErrors(code, signal);
+    const errors = response.data.errors;
+
+    if (!Array.isArray(errors)) {
+      logError("Received invalid error format from API.", errors);
+      return;
+    }
+
+    // --- NEW LOGIC: Underline the entire line ---
+    const diagnostics = errors.map(error => {
+      // The API now returns only line and message.
+      const { line: errorLine, message } = error;
+      
+      // Convert 1-based line from AI to 0-based for VS Code.
+      const lineIndex = Math.max(0, errorLine - 1);
+
+      if (lineIndex >= doc.lineCount) {
+        logError(`API returned invalid line number: ${errorLine}`);
+        return null; // Skip this error if the line doesn't exist
+      }
+
+      const lineText = doc.lineAt(lineIndex);
+      // Create a range that covers the entire line, from the first character to the last.
+      const range = new vscode.Range(
+        new vscode.Position(lineIndex, 0),
+        new vscode.Position(lineIndex, lineText.text.length)
+      );
+      
+      const diagnostic = new vscode.Diagnostic(range, message, vscode.DiagnosticSeverity.Error);
+      diagnostic.source = 'Perl AI Assistant';
+      return diagnostic;
+    }).filter(diag => diag !== null); // Filter out any null diagnostics
+
+    errorDiagnostics.set(doc.uri, diagnostics);
+    logInfo(`Found ${diagnostics.length} errors.`);
+
   } catch (err) {
-    logError(`Error fetching suggestion: ${err.message}`, err);
-    vscode.window.showErrorMessage(`Failed to generate code: ${err.message}`);
-    return null;
+    // If the error was due to cancellation, it's expected, so we just log it quietly.
+    if (err.name === 'CanceledError' || err.name === 'AbortError') {
+      logInfo('Error check was cancelled because a new one was started.');
+    } else {
+      logInfo(`Failed to check for errors: ${err.message}`);
+    }
   }
 }
+
+
+
 
 /**
  * Collects and generates context for AI code generation
@@ -221,16 +344,51 @@ async function activate(context) {
     });
   }, 300);
 
-  const debouncedFetch = debounce(fetchCode, config.debounceTime);
+
+  // Create debounced version of fetchCode
+  const debouncedFetch = debounce(fetchCodeWithDeduplication, debounceTime);
+
+  const debouncedErrorCheck = debounce(
+      (doc) => updateErrorDiagnostics(doc), 
+      errorCheckDebounceTime
+  );
+
+  errorDiagnostics = vscode.languages.createDiagnosticCollection("perl-ai-errors");
+  context.subscriptions.push(errorDiagnostics);
+
+  context.subscriptions.push(
+      vscode.workspace.onDidChangeTextDocument(event => {
+          if (vscode.window.activeTextEditor && event.document === vscode.window.activeTextEditor.document) {
+              debouncedErrorCheck(event.document);
+          }
+      })
+  );
+
+  context.subscriptions.push(
+      vscode.window.onDidChangeActiveTextEditor(editor => {
+          if (editor) {
+              debouncedErrorCheck(editor.document);
+          }
+      })
+  );
+
+  context.subscriptions.push(
+      vscode.workspace.onDidCloseTextDocument(doc => errorDiagnostics.delete(doc.uri))
+  );
+
+  if (vscode.window.activeTextEditor) {
+      debouncedErrorCheck(vscode.window.activeTextEditor.document);
+  }
 
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration(e => {
-      if (e.affectsConfiguration('perlCodeGeneration')) {
+      if (e.affectsConfiguration('perlCodeGeneration')) { // FIX: Corrected typo 'perlCodegeneration'
         loadConfiguration();
         logInfo("Configuration updated", config);
       }
     })
   );
+
 
   const inlineCompletionProvider = {
     async provideInlineCompletionItems(doc, pos) {
@@ -271,61 +429,90 @@ async function activate(context) {
   
   logInfo("Extension setup complete");
 
-  const processSelectionForSidebar = debounce(async (event) => {
-    const selection = event.selections[0];
-    const doc = event.textEditor.document;
+// Add these variables at the top with other global state
+let lastSelectedText = '';
+let lastSuggestions = [];
 
-    // Handle non-Perl files first
-    if (doc.languageId !== 'perl') {
-        logInfo(`Skipping suggestion for non-Perl file: ${doc.languageId}`);
-        // Display an error message if it's not a Perl file
-        treeProvider.refresh([`Error: Only Perl code suggestions are supported. Current file is a '${doc.languageId}' file.`]);
-        return; 
-    }
-    
-    if (!selection || selection.isEmpty) {
-        treeProvider.refresh([]); // Clear sidebar if selection is empty in a Perl file
-        return;
-    }
+// Replace the processSelectionForSidebar function with this improved version
+const processSelectionForSidebar = debounce(async (event) => {
+  const selection = event.selections[0];
+  const doc = event.textEditor.document;
 
-    const selectedText = doc.getText(selection);
+  // Enhanced Perl file detection - check both languageId and file extension
+  const isPerlFile = doc.languageId === 'perl' || 
+                     doc.fileName.endsWith('.pl') || 
+                     doc.fileName.endsWith('.pm') || 
+                     doc.fileName.endsWith('.t');
 
-    if (selectedText.trim()) {
-      try {
-        logInfo("Sending request to backend for alternative suggestions...");
-        
-        const response = await api.post('/altCode/', { code: selectedText });
-        
-        const alternatives = response.data.alternatives || [];
-        
-        const suggestionsForSidebar = alternatives.map(item => item.code);
-
-        if (suggestionsForSidebar.length === 0) {
-            suggestionsForSidebar.push("No specific code suggestions received from AI, or response format was unexpected.");
-        }
-
-        treeProvider.refresh(suggestionsForSidebar); 
-        logInfo("Sidebar refreshed with backend suggestions.");
-
-      } catch (err) {
-        logError('Failed to fetch alternative suggestions from backend', err);
-        
-        let userFacingErrorMessage = "An unexpected error occurred. Please check the Debug Console for details.";
-
-        if (err.code === 'ECONNREFUSED') {
-            userFacingErrorMessage = "Error: Backend server is not running. Please start your FastAPI backend.";
-        } else if (err.response && err.response.data && err.response.data.alternatives && err.response.data.alternatives.length > 0) {
-            userFacingErrorMessage = `Backend Error: ${err.response.data.alternatives[0].code}`;
-        } else if (err.message) {
-            userFacingErrorMessage = `Error fetching suggestions: ${err.message}`;
-        }
-
-        treeProvider.refresh([userFacingErrorMessage]);
+  // Handle non-Perl files first
+  if (!isPerlFile) {
+      logInfo(`Skipping suggestion for non-Perl file: ${doc.languageId}, filename: ${doc.fileName}`);
+      treeProvider.refresh([`Error: Only Perl code suggestions are supported. Current file is a '${doc.languageId}' file (${doc.fileName}).`]);
+      return; 
+  }
+  
+  if (!selection || selection.isEmpty) {
+      // Don't clear immediately - only clear if we had no previous selection
+      if (lastSelectedText === '') {
+          treeProvider.refresh([]);
       }
-    } else {
-        treeProvider.refresh([]); 
+      return;
+  }
+
+  const selectedText = doc.getText(selection);
+  
+  // If the selected text is the same as last time, don't make a new request
+  if (selectedText.trim() === lastSelectedText.trim() && lastSuggestions.length > 0) {
+      logInfo("Using cached suggestions for same selection");
+      treeProvider.refresh(lastSuggestions);
+      return;
+  }
+
+  if (selectedText.trim()) {
+    try {
+      logInfo("Sending request to backend for alternative suggestions...");
+      
+      const response = await api.post('/altCode/', { code: selectedText });
+      
+      const alternatives = response.data.alternatives || [];
+      
+      const suggestionsForSidebar = alternatives.map(item => item.code);
+
+      if (suggestionsForSidebar.length === 0) {
+          suggestionsForSidebar.push("No specific code suggestions received from AI, or response format was unexpected.");
+      }
+
+      // Cache the results
+      lastSelectedText = selectedText.trim();
+      lastSuggestions = suggestionsForSidebar;
+      
+      treeProvider.refresh(suggestionsForSidebar); 
+      logInfo("Sidebar refreshed with backend suggestions.");
+
+    } catch (err) {
+      logError('Failed to fetch alternative suggestions from backend', err);
+      
+      let userFacingErrorMessage = "An unexpected error occurred. Please check the Debug Console for details.";
+
+      if (err.code === 'ECONNREFUSED') {
+          userFacingErrorMessage = "Error: Backend server is not running. Please start your FastAPI backend.";
+      } else if (err.response && err.response.data && err.response.data.alternatives && err.response.data.alternatives.length > 0) {
+          userFacingErrorMessage = `Backend Error: ${err.response.data.alternatives[0].code}`;
+      } else if (err.message) {
+          userFacingErrorMessage = `Error fetching suggestions: ${err.message}`;
+      }
+
+      treeProvider.refresh([userFacingErrorMessage]);
     }
-  }, config.debounceTime); 
+  } else {
+      // Only clear if we're moving away from a selection
+      if (lastSelectedText !== '') {
+          lastSelectedText = '';
+          lastSuggestions = [];
+          treeProvider.refresh([]);
+      }
+  }
+}, debounceTime); 
   context.subscriptions.push(
     vscode.window.onDidChangeTextEditorSelection(processSelectionForSidebar)
   );
