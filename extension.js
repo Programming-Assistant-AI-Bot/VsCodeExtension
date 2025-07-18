@@ -9,16 +9,16 @@ const debounce = require('./utils/debounce');
 const { PerlCodebaseIndexer } = require('./indexers/codebaseIndexer');
 const { PerlRepositoryMapProvider } = require('./collectors/repoMapProvider');
 const { registerCommands } = require('./commands/commands')
-
+const { AlternativeSuggestionsProvider } = require('./sidebarProvider');
 /**
  * Global extension configuration
  */
 const config = {
-  // Default values, will be overridden by user settings
+  debounceTime: 500, 
   relevantCodeCount: 2,
   useMemoryIndex:true,
   indexOnStartup: true,
-  contextWindowSize: 15, // lines around cursor to consider for context
+  contextWindowSize: 15, 
 };
 
 // Global state
@@ -129,16 +129,14 @@ async function initializeCodebaseIndexer() {
   try {
     const fileWatcher = vscode.workspace.createFileSystemWatcher(
       '**/*.{pl,pm,t}',
-      false, // Don't ignore creates
-      false, // Don't ignore changes
-      false  // Don't ignore deletions
+      false, 
+      false, 
+      false  
     );
 
-    // Create the indexer
     codebaseIndexer = new PerlCodebaseIndexer(workspaceFolders[0], fileWatcher);
     
     if (config.indexOnStartup) {
-      // Start indexing with progress indicator
       await vscode.window.withProgress({
         location: vscode.ProgressLocation.Notification,
         title: "Indexing Perl codebase",
@@ -204,10 +202,8 @@ function logError(message, error) {
 async function activate(context) {
   logInfo("Extension activated");
   
-  // Load configuration
   loadConfiguration();
   
-  // Initialize Tree-sitter
   try {
     await initTreeSitter();
     const parser = getParser();
@@ -217,7 +213,6 @@ async function activate(context) {
     vscode.window.showWarningMessage("Perl parser initialization failed. Some features may not work correctly.");
   }
 
-  // Initialize codebase indexer with delay to not block extension activation
   setTimeout(() => {
     initializeCodebaseIndexer().then(success => {
       if (success) {
@@ -226,10 +221,8 @@ async function activate(context) {
     });
   }, 300);
 
-  // Create debounced version of fetchCode
-  const debouncedFetch = debounce(fetchCode, debounceTime);
+  const debouncedFetch = debounce(fetchCode, config.debounceTime);
 
-  // Register configuration change listener
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration(e => {
       if (e.affectsConfiguration('perlCodeGeneration')) {
@@ -239,7 +232,6 @@ async function activate(context) {
     })
   );
 
-  // Register inline completion provider
   const inlineCompletionProvider = {
     async provideInlineCompletionItems(doc, pos) {
       const line = doc.lineAt(pos).text;
@@ -251,9 +243,7 @@ async function activate(context) {
       const suggestion = await debouncedFetch(comment, doc, pos);
 
       if (!suggestion) return { items: [] };
-      // Remove markdown formatting
       const cleanCode = suggestion.replace(/```[\w]*\n|\n```/g, '');
-      // Use the clean code
       console.log(cleanCode);
       const insertPos = new vscode.Position(pos.line, line.length);
       return {
@@ -271,12 +261,93 @@ async function activate(context) {
       inlineCompletionProvider
     )
   );
+  const treeProvider = new AlternativeSuggestionsProvider();
+  const treeView = vscode.window.createTreeView('perlCodeGen.alternativeSuggestions', {
+    treeDataProvider: treeProvider
+  });
+  context.subscriptions.push(treeView);
 
-  // Register commands
   registerCommands(context, { config, logError, logInfo, initializeCodebaseIndexer, getCodebaseIndexer: () => codebaseIndexer})
   
   logInfo("Extension setup complete");
+
+  const processSelectionForSidebar = debounce(async (event) => {
+    const selection = event.selections[0];
+    const doc = event.textEditor.document;
+
+    // Handle non-Perl files first
+    if (doc.languageId !== 'perl') {
+        logInfo(`Skipping suggestion for non-Perl file: ${doc.languageId}`);
+        // Display an error message if it's not a Perl file
+        treeProvider.refresh([`Error: Only Perl code suggestions are supported. Current file is a '${doc.languageId}' file.`]);
+        return; 
+    }
+    
+    if (!selection || selection.isEmpty) {
+        treeProvider.refresh([]); // Clear sidebar if selection is empty in a Perl file
+        return;
+    }
+
+    const selectedText = doc.getText(selection);
+
+    if (selectedText.trim()) {
+      try {
+        logInfo("Sending request to backend for alternative suggestions...");
+        
+        const response = await api.post('/altCode/', { code: selectedText });
+        
+        const alternatives = response.data.alternatives || [];
+        
+        const suggestionsForSidebar = alternatives.map(item => item.code);
+
+        if (suggestionsForSidebar.length === 0) {
+            suggestionsForSidebar.push("No specific code suggestions received from AI, or response format was unexpected.");
+        }
+
+        treeProvider.refresh(suggestionsForSidebar); 
+        logInfo("Sidebar refreshed with backend suggestions.");
+
+      } catch (err) {
+        logError('Failed to fetch alternative suggestions from backend', err);
+        
+        let userFacingErrorMessage = "An unexpected error occurred. Please check the Debug Console for details.";
+
+        if (err.code === 'ECONNREFUSED') {
+            userFacingErrorMessage = "Error: Backend server is not running. Please start your FastAPI backend.";
+        } else if (err.response && err.response.data && err.response.data.alternatives && err.response.data.alternatives.length > 0) {
+            userFacingErrorMessage = `Backend Error: ${err.response.data.alternatives[0].code}`;
+        } else if (err.message) {
+            userFacingErrorMessage = `Error fetching suggestions: ${err.message}`;
+        }
+
+        treeProvider.refresh([userFacingErrorMessage]);
+      }
+    } else {
+        treeProvider.refresh([]); 
+    }
+  }, config.debounceTime); 
+  context.subscriptions.push(
+    vscode.window.onDidChangeTextEditorSelection(processSelectionForSidebar)
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('perlcodegeneration.showSuggestions', () => {
+      const dummySuggestions = ['Suggested fix 1', 'Suggested snippet 2'];
+      treeProvider.refresh(dummySuggestions);  // use the same instance!
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('perlCodeGen.copySuggestion', async (codeToCopy) => {
+        await vscode.env.clipboard.writeText(codeToCopy);
+        vscode.window.showInformationMessage('Suggestion copied to clipboard!');
+    })
+  );
+
+
 }
+exports.activate = activate;
+
 
 /**
  * Extension deactivation handler
@@ -295,5 +366,23 @@ function deactivate() {
     outputChannel = null;
   }
 }
+exports.deactivate = deactivate;
 
-module.exports = { activate, deactivate };
+function getCodebaseIndexer() {
+  return codebaseIndexer;
+}
+
+
+function escapeHtml(str) {
+  return str.replace(/[&<>"']/g, tag => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;',
+    '"': '&quot;', "'": '&#39;'
+  }[tag]));
+}
+
+
+module.exports = {
+  activate,
+  deactivate,
+  getCodebaseIndexer
+};
