@@ -49,6 +49,29 @@ let errorCheckDebounceTime = 2000;
 let errorDiagnostics = null;
 let errorCheckAbortController = new AbortController();
 
+
+/**
+ * Helper function to find the location of a code chunk in the document.
+ * @param {vscode.TextDocument} doc The document to search in.
+ * @param {string} chunk The code chunk to find.
+ * @returns {vscode.Range | null} The range of the chunk, or null if not found.
+ */
+function findChunkLocation(doc, chunk) {
+    const fullText = doc.getText();
+    const normalizedText = fullText.replace(/\r\n/g, "\n");
+    const startIndex = normalizedText.indexOf(chunk);
+
+    if (startIndex === -1) {
+        return null;
+    }
+
+    const startPos = doc.positionAt(startIndex);
+    const endPos = doc.positionAt(startIndex + chunk.length);
+    
+    return new vscode.Range(startPos, endPos);
+}
+
+
 // /**
 //  * Fetches code suggestion based on a comment
 //  * @param {string} comment - The user's comment
@@ -102,15 +125,40 @@ async function fetchCodeWithDeduplication(comment, doc, pos) {
   return requestPromise;
 }
 
+// async function fetchCodeCompletion(doc, pos) {
+//   try {
+    
+//     // Get the current line up to cursor position
+//     const line = doc.lineAt(pos);
+//     const currentLineText = line.text.substring(0, pos.character);
+
+//     const ctx = await generateContextForComments(currentLineText, doc, pos);
+    
+//     const response = await api.post('/commentCode/complete/', { 
+//       codePrefix: ctx.codePrefix +"\n"+currentLineText,
+//       codeSuffix: ctx.codeSuffix,
+//       imports: ctx.imports,
+//       usedModules: ctx.usedModules,
+//       variableDefinitions: ctx.variableDefinitions,
+//       importDefinitions: ctx.importDefinitions,
+//       relatedCodeStructures: ctx.relatedCodeStructures,
+//       currentBlock: ctx.currentBlock
+//     });
+    
+//     return response.data.code;
+//   } catch (err) {
+//     logError(`Error fetching completion: ${err.message}`, err);
+//     return null;
+//   }
+// }
 
 /**
- * Analyzes the document for errors and underlines the entire line.
+ * Analyzes the document for errors by finding the code chunk and underlining it.
  * @param {vscode.TextDocument} doc - The document to check.
  */
 async function updateErrorDiagnostics(doc) {
   if (doc.languageId !== 'perl') return;
 
-  // Cancel any previous, still-running check to prevent "ghost errors"
   errorCheckAbortController.abort();
   errorCheckAbortController = new AbortController();
   const signal = errorCheckAbortController.signal;
@@ -126,43 +174,41 @@ async function updateErrorDiagnostics(doc) {
       return;
     }
 
-    // --- NEW LOGIC: Underline the entire line ---
-    const diagnostics = errors.map(error => {
-      // The API now returns only line and message.
-      const { line: errorLine, message } = error;
-      
-      // Convert 1-based line from AI to 0-based for VS Code.
-      const lineIndex = Math.max(0, errorLine - 1);
+    logInfo(`Extension Info: Received ${errors.length} errors from the backend.`);
 
-      if (lineIndex >= doc.lineCount) {
-        logError(`API returned invalid line number: ${errorLine}`);
-        return null; // Skip this error if the line doesn't exist
+    const diagnostics = errors.map(error => {
+      // Assuming the API returns a 'code_chunk' and a 'message'
+      const { code_chunk, message } = error;
+      
+      if (!code_chunk) {
+        logError("API response did not contain a 'code_chunk'.", error);
+        return null;
       }
 
-      const lineText = doc.lineAt(lineIndex);
-      // Create a range that covers the entire line, from the first character to the last.
-      const range = new vscode.Range(
-        new vscode.Position(lineIndex, 0),
-        new vscode.Position(lineIndex, lineText.text.length)
-      );
+      const range = findChunkLocation(doc, code_chunk);
+
+      if (!range) {
+        logError(`Could not find the code chunk in the document., { chunk: code_chunk }`);
+        return null;
+      }
       
       const diagnostic = new vscode.Diagnostic(range, message, vscode.DiagnosticSeverity.Error);
       diagnostic.source = 'Perl AI Assistant';
       return diagnostic;
-    }).filter(diag => diag !== null); // Filter out any null diagnostics
+    }).filter(diag => diag !== null);
 
     errorDiagnostics.set(doc.uri, diagnostics);
-    logInfo(`Found ${diagnostics.length} errors.`);
+    logInfo(`Displaying ${diagnostics.length} valid errors in the editor.`);
 
   } catch (err) {
-    // If the error was due to cancellation, it's expected, so we just log it quietly.
     if (err.name === 'CanceledError' || err.name === 'AbortError') {
       logInfo('Error check was cancelled because a new one was started.');
     } else {
-      logInfo(`Failed to check for errors: ${err.message}`);
+      logInfo(`Failed to check for errors: ${err.message}, err`);
     }
   }
 }
+
 
 
 
@@ -380,6 +426,8 @@ async function activate(context) {
       debouncedErrorCheck(vscode.window.activeTextEditor.document);
   }
 
+
+
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration(e => {
       if (e.affectsConfiguration('perlCodeGeneration')) { // FIX: Corrected typo 'perlCodegeneration'
@@ -412,6 +460,88 @@ async function activate(context) {
       };
     }
   };
+  
+// const codeCompletionProvider = {
+//   async provideCompletionItems(doc, pos, token, context) {
+//     // Only provide completions for Perl files
+//     if (doc.languageId !== 'perl' && 
+//         !doc.fileName.endsWith('.pl') && 
+//         !doc.fileName.endsWith('.pm') && 
+//         !doc.fileName.endsWith('.t')) {
+//       return { items: [] };
+//     }
+
+//     const line = doc.lineAt(pos);
+//     const currentLineText = line.text.substring(0, pos.character);
+//     const fullLineText = line.text;
+    
+//     // Skip if line is empty, comment, or already complete
+//     if (!currentLineText.trim() || 
+//         currentLineText.trim().startsWith('#') ||
+//         this.isLineComplete(fullLineText)) {
+//       return { items: [] };
+//     }
+
+//     // Only trigger on meaningful patterns
+//     if (!this.shouldTriggerCompletion(currentLineText, context)) {
+//       return { items: [] };
+//     }
+
+//     try {
+//       const completion = await fetchCodeCompletion(doc, pos);
+      
+//       if (!completion) {
+//         return { items: [] };
+//       }
+
+//       // Create completion item
+//       const item = new vscode.CompletionItem(
+//         completion,
+//         vscode.CompletionItemKind.Text
+//       );
+      
+//       item.insertText = completion;
+//       item.detail = 'Perl Code Completion';
+//       item.documentation = 'Generated by Perl AI Assistant';
+      
+//       // Set sort text to prioritize this completion
+//       item.sortText = '0000';
+      
+//       return { items: [item] };
+      
+//     } catch (err) {
+//       logError('Error in code completion:', err);
+//       return { items: [] };
+//     }
+//   },
+
+//   shouldTriggerCompletion(text, context) {
+//     // Method/property access
+//     if (text.match(/[\$@%]\w+\.|::|->$/)) return true;
+    
+//     // Variable declarations
+//     if (text.match(/\b(my|our|local)\s+[\$@%]\w*$/)) return true;
+    
+//     // Control structures
+//     if (text.match(/\b(if|while|for|foreach|unless|until)\s*\(?\s*$/)) return true;
+    
+//     // Function calls
+//     if (text.match(/\w+\s*\($/)) return true;
+    
+//     // Hash/array access
+//     if (text.match(/[\$@%]\w+[\[\{]$/)) return true;
+    
+//     // Only trigger after typing at least 2 characters
+//     return text.trim().length >= 2;
+//   },
+
+//   isLineComplete(line) {
+//     // Check if line ends with complete statement
+//     return line.trim().endsWith(';') || 
+//            line.trim().endsWith('}') ||
+//            line.trim().endsWith('{');
+//   }
+// };
 
   context.subscriptions.push(
     vscode.languages.registerInlineCompletionItemProvider(
@@ -419,6 +549,19 @@ async function activate(context) {
       inlineCompletionProvider
     )
   );
+
+  //   // Register the code completion provider
+  // context.subscriptions.push(
+  //   vscode.languages.registerCompletionItemProvider(
+  //     { pattern: '**/*.{pl,pm,t}' },
+  //     codeCompletionProvider,
+  //     // Trigger characters - these will activate the completion
+  //     '.', ':', '$', '@', '%', '(', '{', '[', ' ', '-', '>'
+  //   )
+  // );
+
+
+
   const treeProvider = new AlternativeSuggestionsProvider();
   const treeView = vscode.window.createTreeView('perlCodeGen.alternativeSuggestions', {
     treeDataProvider: treeProvider
@@ -446,7 +589,7 @@ const processSelectionForSidebar = debounce(async (event) => {
 
   // Handle non-Perl files first
   if (!isPerlFile) {
-      logInfo(`Skipping suggestion for non-Perl file: ${doc.languageId}, filename: ${doc.fileName}`);
+      // logInfo(`Skipping suggestion for non-Perl file: ${doc.languageId}, filename: ${doc.fileName}`);
       treeProvider.refresh([`Error: Only Perl code suggestions are supported. Current file is a '${doc.languageId}' file (${doc.fileName}).`]);
       return; 
   }
