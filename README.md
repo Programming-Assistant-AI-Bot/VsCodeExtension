@@ -25,6 +25,12 @@ A powerful VS Code extension that provides AI-powered assistance for Perl develo
 - **Variable Definition Tracking**: Understands variable scope and definitions across files
 - **Symbol Usage Analysis**: Identifies how symbols are used throughout your project
 
+### 🔍 Vector-Based Semantic Search
+- **LanceDB Integration**: Uses LanceDB for high-performance vector storage and semantic search
+- **Embedding-Based Matching**: Leverages MiniLM embeddings to find semantically similar code
+- **Intelligent Code Retrieval**: Finds relevant code examples based on context and meaning, not just keywords
+- **Persistent Index**: Maintains a persistent vector database for fast startup and consistent performance
+
 ## 📦 Installation
 
 1. **Install the Extension**
@@ -81,15 +87,26 @@ Access settings through `File > Preferences > Settings` and search for "Perl Cod
 | `perlCodeGeneration.contextWindowSize` | `15` | Number of lines to consider around cursor for context |
 | `perlCodeGeneration.useMemoryIndex` | `true` | Use in-memory index instead of LanceDB for module resolution |
 
+### LanceDB Configuration
+
+The extension uses LanceDB for vector-based semantic search to provide more intelligent code suggestions:
+
+- **Database Location**: Stored in your system's temp directory under `perl-code-gen-lancedb`
+- **Vector Dimensions**: Uses 384-dimensional vectors (MiniLM-L6-v2 embeddings)
+- **Table Schema**: Stores code content, file paths, titles, and vector embeddings
+- **Automatic Indexing**: Builds vector index during workspace initialization
+
 ### Example Configuration
 ```json
 {
   "perlCodeGeneration.relevantCodeCount": 5,
   "perlCodeGeneration.indexOnStartup": true,
   "perlCodeGeneration.contextWindowSize": 20,
-  "perlCodeGeneration.useMemoryIndex": true
+  "perlCodeGeneration.useMemoryIndex": false
 }
 ```
+
+**Note**: Set `useMemoryIndex` to `false` to enable LanceDB vector search for enhanced semantic code matching.
 
 ## 🎯 Usage
 
@@ -127,6 +144,7 @@ Access settings through `File > Preferences > Settings` and search for "Perl Cod
 VsCodeExtension/
 ├── extension.js              # Main extension entry point
 ├── package.json             # Extension manifest and configuration
+├── sidebarprovider.js       # Sidebar suggestions provider
 ├── api/
 │   └── api.js              # Backend API communication
 ├── collectors/             # Context and code analysis
@@ -137,10 +155,12 @@ VsCodeExtension/
 │   └── repoMapProvider.js
 ├── commands/
 │   └── commands.js         # VS Code command implementations
+├── embeddings/
+│   └── miniLmEmbeddings.js # MiniLM embedding generation
 ├── indexers/               # Codebase indexing and search
 │   ├── codebaseIndexer.js
 │   ├── codeStructureIndex.js
-│   └── vectorIndex.js
+│   └── vectorIndex.js      # LanceDB vector operations
 ├── parsers/
 │   └── treeSitter.js       # Tree-sitter parser integration
 ├── utils/
@@ -187,6 +207,12 @@ Access commands through the Command Palette (Ctrl+Shift+P):
    ```
    **Solution**: Ensure you have a workspace folder open with Perl files
 
+4. **LanceDB Connection Issues**
+   ```
+   Error initializing LanceDB
+   ```
+   **Solution**: Check write permissions to temp directory and ensure sufficient disk space for vector database
+
 ### Debug Information
 
 Enable debug logging by checking the "Perl Code Generation" output channel:
@@ -222,6 +248,7 @@ vsce package
 - **VS Code**: Version 1.60.0 or higher
 - **Node.js**: Version 14.0 or higher
 - **Backend Server**: Programming Assistant AI Bot backend running on port 8000
+- **LanceDB**: For vector-based semantic search (automatically installed with extension)
 - **Perl**: For testing and validation (optional)
 
 ## 🤝 Contributing
